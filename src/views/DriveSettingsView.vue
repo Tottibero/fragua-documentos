@@ -2,6 +2,7 @@
 import { onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useDriveStore } from '@/stores/drive'
+import { useToastStore } from '@/stores/toast'
 import AlertMessage from '@/components/common/AlertMessage.vue'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
@@ -27,12 +28,22 @@ const CALLBACK_ERROR_MESSAGES: Record<string, string> = {
 const route = useRoute()
 const router = useRouter()
 const driveStore = useDriveStore()
+const toastStore = useToastStore()
 
 const callbackNotice = ref<CallbackNotice | null>(null)
 const isConfirmOpen = ref(false)
 
-function handleConnect() {
-  driveStore.connect()
+async function handleConnect() {
+  await driveStore.connect()
+  // Un `connect()` con éxito navega fuera de la aplicación (a la pantalla de
+  // consentimiento de Google) antes de que esta línea llegue a ejecutarse;
+  // solo un fallo al obtener la URL de conexión (sin llegar a navegar) es un
+  // resultado conocido aquí y merece complementar `connectError` con un
+  // toast — la propia conexión/reconexión se confirma o falla más tarde, al
+  // volver del `callback` de Google (ver el `onMounted` de abajo).
+  if (driveStore.connectError) {
+    toastStore.error(driveStore.connectError)
+  }
 }
 
 function handleRetry() {
@@ -50,7 +61,10 @@ function cancelDisconnect() {
 async function confirmDisconnect() {
   await driveStore.disconnect()
   if (!driveStore.disconnectError) {
+    toastStore.success('Google Drive se ha desconectado.')
     isConfirmOpen.value = false
+  } else {
+    toastStore.error(driveStore.disconnectError)
   }
 }
 
@@ -58,13 +72,17 @@ onMounted(async () => {
   const driveParam = route.query.drive
 
   if (driveParam === 'success') {
-    callbackNotice.value = { variant: 'info', message: 'Google Drive se ha conectado correctamente.' }
+    const message = 'Google Drive se ha conectado correctamente.'
+    callbackNotice.value = { variant: 'info', message }
+    // Único punto de publicación de este resultado: es la primera vez que
+    // la interfaz lo conoce (llega tras la redirección de vuelta desde
+    // Google), así que el toast no duplica ningún otro aviso ya mostrado.
+    toastStore.success(message)
   } else if (driveParam === 'error') {
     const reason = typeof route.query.reason === 'string' ? route.query.reason : ''
-    callbackNotice.value = {
-      variant: 'error',
-      message: CALLBACK_ERROR_MESSAGES[reason] ?? 'No se ha podido conectar Google Drive.',
-    }
+    const message = CALLBACK_ERROR_MESSAGES[reason] ?? 'No se ha podido conectar Google Drive.'
+    callbackNotice.value = { variant: 'error', message }
+    toastStore.error(message)
   }
 
   // Limpia los parámetros del callback de la URL para no reprocesarlos

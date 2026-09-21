@@ -1,45 +1,20 @@
 <script setup lang="ts">
 import EmptyState from '@/components/common/EmptyState.vue'
 import AlertMessage from '@/components/common/AlertMessage.vue'
+import IconButton from '@/components/common/IconButton.vue'
+import { Download, Pencil, FolderInput, FileUp, History, Trash2 } from '@lucide/vue'
+import { isGoogleNative as isGoogleNativeMimeType, readableDriveItemType } from '@/utils/drive-item-type'
 import type { DriveItem } from '@/types'
-
-const MIME_TYPE_LABELS: Record<string, string> = {
-  'application/vnd.google-apps.document': 'Documento de Google',
-  'application/vnd.google-apps.spreadsheet': 'Hoja de cálculo de Google',
-  'application/vnd.google-apps.presentation': 'Presentación de Google',
-  'application/vnd.google-apps.form': 'Formulario de Google',
-  'application/vnd.google-apps.drawing': 'Dibujo de Google',
-  'application/pdf': 'PDF',
-  'application/msword': 'Documento de Word',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'Documento de Word',
-  'application/vnd.ms-excel': 'Hoja de cálculo de Excel',
-  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'Hoja de cálculo de Excel',
-  'application/vnd.ms-powerpoint': 'Presentación de PowerPoint',
-  'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'Presentación de PowerPoint',
-  'text/plain': 'Texto',
-  'text/csv': 'CSV',
-  'application/zip': 'Archivo comprimido',
-  'application/json': 'JSON',
-}
-
-const GOOGLE_NATIVE_MIME_PREFIX = 'application/vnd.google-apps.'
 
 /** Documentos/hojas/presentaciones... nativos de Google no tienen contenido
  * binario propio — `GET /drive/files/:id/download` los rechaza con 400. No
  * se ofrece un botón que solo podría fallar. */
 function isGoogleNative(item: DriveItem): boolean {
-  return item.mimeType.startsWith(GOOGLE_NATIVE_MIME_PREFIX)
+  return isGoogleNativeMimeType(item.mimeType)
 }
 
 function readableType(item: DriveItem): string {
-  if (item.isFolder) return 'Carpeta'
-  const known = MIME_TYPE_LABELS[item.mimeType]
-  if (known) return known
-  if (item.mimeType.startsWith('image/')) return 'Imagen'
-  if (item.mimeType.startsWith('video/')) return 'Vídeo'
-  if (item.mimeType.startsWith('audio/')) return 'Audio'
-  const subtype = item.mimeType.split('/')[1]
-  return subtype ? subtype.toUpperCase() : 'Archivo'
+  return readableDriveItemType(item)
 }
 
 function formatSize(size: number | null): string {
@@ -70,6 +45,8 @@ const props = withDefaults(
     downloadError?: string
     renamingItemId: string | null
     movingItemId: string | null
+    replacingFileId: string | null
+    trashingItemId: string | null
   }>(),
   { loadMoreError: '', downloadError: '' },
 )
@@ -80,6 +57,9 @@ const emit = defineEmits<{
   download: [item: DriveItem]
   rename: [item: DriveItem, triggerElement: HTMLElement]
   move: [item: DriveItem, triggerElement: HTMLElement]
+  replace: [item: DriveItem, triggerElement: HTMLElement]
+  versions: [item: DriveItem, triggerElement: HTMLElement]
+  trash: [item: DriveItem, triggerElement: HTMLElement]
 }>()
 
 function handleDownloadClick(item: DriveItem) {
@@ -101,6 +81,25 @@ function handleMoveClick(item: DriveItem, event: MouseEvent) {
   // curso (de este elemento o de cualquier otro), no se inicia otro.
   if (props.movingItemId) return
   emit('move', item, event.currentTarget as HTMLElement)
+}
+
+function handleReplaceClick(item: DriveItem, event: MouseEvent) {
+  // Defensa además del `:disabled` del botón: mientras haya un reemplazo en
+  // curso (de este archivo o de cualquier otro), no se inicia otro.
+  if (props.replacingFileId) return
+  emit('replace', item, event.currentTarget as HTMLElement)
+}
+
+function handleVersionsClick(item: DriveItem, event: MouseEvent) {
+  emit('versions', item, event.currentTarget as HTMLElement)
+}
+
+function handleTrashClick(item: DriveItem, event: MouseEvent) {
+  // Defensa además del `:disabled` del botón: mientras haya un envío a la
+  // papelera en curso (de este elemento o de cualquier otro), no se inicia
+  // otro.
+  if (props.trashingItemId) return
+  emit('trash', item, event.currentTarget as HTMLElement)
 }
 </script>
 
@@ -172,37 +171,49 @@ function handleMoveClick(item: DriveItem, event: MouseEvent) {
                 <span v-if="isGoogleNative(item)" class="drive-items__no-action">
                   Descarga directa no disponible
                 </span>
-                <button
-                  v-else
-                  type="button"
-                  class="drive-items__download-button"
-                  :disabled="downloadingFileId !== null"
-                  :aria-busy="downloadingFileId === item.id"
-                  @click="handleDownloadClick(item)"
-                >
-                  {{ downloadingFileId === item.id ? 'Descargando…' : 'Descargar' }}
-                </button>
+                <template v-else>
+                  <IconButton
+                    :icon="Download"
+                    :label="`Descargar ${item.name}`"
+                    :busy="downloadingFileId === item.id"
+                    :disabled="downloadingFileId !== null"
+                    @click="handleDownloadClick(item)"
+                  />
+                  <IconButton
+                    :icon="FileUp"
+                    :label="`Subir nueva versión de ${item.name}`"
+                    :busy="replacingFileId === item.id"
+                    :disabled="replacingFileId !== null"
+                    @click="handleReplaceClick(item, $event)"
+                  />
+                  <IconButton
+                    :icon="History"
+                    :label="`Historial de versiones de ${item.name}`"
+                    @click="handleVersionsClick(item, $event)"
+                  />
+                </template>
               </template>
-              <button
-                type="button"
-                class="drive-items__rename-button"
-                :aria-label="`Renombrar ${item.name}`"
+              <IconButton
+                :icon="Pencil"
+                :label="`Renombrar ${item.name}`"
+                :busy="renamingItemId === item.id"
                 :disabled="renamingItemId !== null"
-                :aria-busy="renamingItemId === item.id"
                 @click="handleRenameClick(item, $event)"
-              >
-                {{ renamingItemId === item.id ? 'Renombrando…' : 'Renombrar' }}
-              </button>
-              <button
-                type="button"
-                class="drive-items__move-button"
-                :aria-label="`Mover ${item.name}`"
+              />
+              <IconButton
+                :icon="FolderInput"
+                :label="`Mover ${item.name}`"
+                :busy="movingItemId === item.id"
                 :disabled="movingItemId !== null"
-                :aria-busy="movingItemId === item.id"
                 @click="handleMoveClick(item, $event)"
-              >
-                {{ movingItemId === item.id ? 'Moviendo…' : 'Mover' }}
-              </button>
+              />
+              <IconButton
+                :icon="Trash2"
+                :label="`Enviar ${item.name} a la papelera`"
+                :busy="trashingItemId === item.id"
+                :disabled="trashingItemId !== null"
+                @click="handleTrashClick(item, $event)"
+              />
             </div>
           </div>
         </li>
@@ -237,14 +248,23 @@ function handleMoveClick(item: DriveItem, event: MouseEvent) {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.4rem;
+  gap: 0.3rem;
 }
 
 .drive-items__row {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--bg-surface);
-  overflow: hidden;
+  /* Sin `overflow: hidden`: el tooltip de los IconButton de acciones se
+   * posiciona fuera de esta caja (debajo del botón) y no debe recortarse.
+   * El fondo propio de la fila y del control primario ya respeta su propio
+   * `border-radius` sin necesidad de recortar contenido. */
+  transition: background-color 0.15s ease;
+}
+
+.drive-items__row:hover,
+.drive-items__row:focus-within {
+  background: var(--bg-hover);
 }
 
 .drive-items__entry {
@@ -254,7 +274,7 @@ function handleMoveClick(item: DriveItem, event: MouseEvent) {
   align-items: center;
   gap: 0.75rem;
   min-height: 44px;
-  padding: 0.6rem 0.9rem;
+  padding: 0.5rem 0.75rem;
 }
 
 /* Control primario (icono + nombre): en carpetas es un <button> que abre la
@@ -296,7 +316,7 @@ button.drive-items__primary:hover {
 }
 
 .drive-items__entry--folder .drive-items__icon {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .drive-items__name {
@@ -340,36 +360,7 @@ button.drive-items__primary:hover {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 0.5rem;
-}
-
-.drive-items__download-button,
-.drive-items__rename-button,
-.drive-items__move-button {
-  min-height: 44px;
-  min-width: 44px;
-  padding: 0.4rem 0.9rem;
-  border-radius: var(--radius-sm);
-  font-size: 0.82rem;
-  font-weight: 600;
-  cursor: pointer;
-  border: 1px solid var(--border-strong);
-  background: var(--bg-surface);
-  color: var(--text-primary);
-  white-space: nowrap;
-}
-
-.drive-items__download-button:hover:not(:disabled),
-.drive-items__rename-button:hover:not(:disabled),
-.drive-items__move-button:hover:not(:disabled) {
-  background: var(--bg-hover);
-}
-
-.drive-items__download-button:disabled,
-.drive-items__rename-button:disabled,
-.drive-items__move-button:disabled {
-  opacity: 0.65;
-  cursor: not-allowed;
+  gap: 0.25rem;
 }
 
 .drive-items__no-action {

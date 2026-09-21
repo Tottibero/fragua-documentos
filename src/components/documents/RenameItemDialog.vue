@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { nextTick, ref, watch } from 'vue'
 import AlertMessage from '@/components/common/AlertMessage.vue'
-import type { DriveItem } from '@/types'
+import NameConflictResolver from '@/components/documents/NameConflictResolver.vue'
+import type { DriveItem, DriveNameConflictResponse } from '@/types'
 
 // Mismas reglas que el backend (`DRIVE_SAFE_NAME_PATTERN`, ya aplicadas
 // sobre el valor recortado): obligatorio, distinto de "." / "..", máximo
@@ -39,14 +40,29 @@ const props = withDefaults(
     item: DriveItem | null
     isRenaming: boolean
     error?: string
+    /** Fase 2.6: conflicto estructurado del renombrado en curso — su sola
+     * presencia decide si se muestra el formulario o
+     * `NameConflictResolver`. */
+    conflict: DriveNameConflictResponse | null
   }>(),
   { error: '' },
 )
 
-const emit = defineEmits<{ submit: [name: string]; cancel: [] }>()
+const emit = defineEmits<{
+  submit: [name: string]
+  cancel: []
+  /** Reenvío tras un conflicto — lleva el mismo nombre ya introducido y
+   * validado, con `keep_both` (la única resolución que renombrar admite). */
+  'resolve-keep-both': [name: string]
+  /** "Volver" del resolver: cancela solo la resolución, nunca el diálogo
+   * completo — el padre limpia `conflict` (vía `resetRenameState`) y este
+   * componente vuelve a mostrar el formulario con el nombre intacto. */
+  'conflict-back': []
+}>()
 
 const dialogEl = ref<HTMLDialogElement>()
 const nameInput = ref<HTMLInputElement>()
+const conflictResolverRef = ref<InstanceType<typeof NameConflictResolver>>()
 const name = ref('')
 const fieldError = ref('')
 
@@ -110,6 +126,36 @@ async function handleSubmit() {
   fieldError.value = ''
   emit('submit', name.value.trim())
 }
+
+// Fase 2.6: al aparecer un conflicto, el foco pasa al título del bloque de
+// resolución; al desaparecer (por "Volver" o por una nueva petición que ya
+// no lo reproduce) vuelve al campo de nombre, con el texto seleccionado
+// igual que al abrir el diálogo.
+watch(
+  () => props.conflict,
+  async (conflict, previousConflict) => {
+    if (!props.open) return
+    if (conflict) {
+      await nextTick()
+      await conflictResolverRef.value?.focusTitle()
+    } else if (previousConflict) {
+      await nextTick()
+      nameInput.value?.focus()
+      nameInput.value?.select()
+    }
+  },
+)
+
+// Reenvío de una decisión explícita: siempre con el mismo nombre ya
+// introducido y validado — el backend ya lo aceptó salvo por el nombre
+// duplicado. Renombrar solo admite `keep_both` (nunca `replace`).
+function handleKeepBoth() {
+  emit('resolve-keep-both', name.value.trim())
+}
+
+function handleConflictBack() {
+  emit('conflict-back')
+}
 </script>
 
 <template>
@@ -126,7 +172,24 @@ async function handleSubmit() {
         Renombrar «{{ item?.name ?? '' }}»
       </h2>
 
-      <form class="rename-item-dialog__form" novalidate @submit.prevent="handleSubmit">
+      <NameConflictResolver
+        v-if="conflict"
+        ref="conflictResolverRef"
+        :conflicts="conflict.conflicts"
+        :allowed-resolutions="conflict.allowedResolutions"
+        operation="rename"
+        :busy="isRenaming"
+        @keep-both="handleKeepBoth"
+        @cancel="handleConflictBack"
+      />
+
+      <form
+        v-else
+        id="rename-item-form"
+        class="rename-item-dialog__form"
+        novalidate
+        @submit.prevent="handleSubmit"
+      >
         <div class="field">
           <label for="rename-item-name">Nuevo nombre</label>
           <input
@@ -145,26 +208,28 @@ async function handleSubmit() {
         </div>
 
         <AlertMessage v-if="error" variant="error">{{ error }}</AlertMessage>
-
-        <div class="rename-item-dialog__actions">
-          <button
-            type="button"
-            class="rename-item-dialog__cancel"
-            :disabled="isRenaming"
-            @click="emit('cancel')"
-          >
-            Cancelar
-          </button>
-          <button
-            type="submit"
-            class="rename-item-dialog__confirm"
-            :disabled="isRenaming"
-            :aria-busy="isRenaming"
-          >
-            {{ isRenaming ? 'Renombrando…' : 'Renombrar' }}
-          </button>
-        </div>
       </form>
+
+      <div class="rename-item-dialog__actions">
+        <button
+          type="button"
+          class="rename-item-dialog__cancel"
+          :disabled="isRenaming"
+          @click="emit('cancel')"
+        >
+          Cancelar
+        </button>
+        <button
+          v-if="!conflict"
+          type="submit"
+          form="rename-item-form"
+          class="rename-item-dialog__confirm"
+          :disabled="isRenaming"
+          :aria-busy="isRenaming"
+        >
+          {{ isRenaming ? 'Renombrando…' : 'Renombrar' }}
+        </button>
+      </div>
     </div>
   </dialog>
 </template>

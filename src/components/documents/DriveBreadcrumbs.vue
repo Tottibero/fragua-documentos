@@ -77,7 +77,7 @@ defineExpose({ focusCurrent })
   padding: 0 0.5rem;
   border: none;
   background: transparent;
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: 0.9rem;
   font-weight: 600;
   cursor: pointer;

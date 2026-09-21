@@ -2,6 +2,7 @@
 import { onMounted, onUnmounted, ref } from 'vue'
 import AppHeader from '@/components/layout/AppHeader.vue'
 import AppSidebar from '@/components/layout/AppSidebar.vue'
+import ToastContainer from '@/components/common/ToastContainer.vue'
 
 const isNavOpen = ref(false)
 
@@ -24,6 +25,7 @@ onUnmounted(() => window.removeEventListener('keydown', handleKeydown))
         <router-view />
       </main>
     </div>
+    <ToastContainer />
   </div>
 </template>
 

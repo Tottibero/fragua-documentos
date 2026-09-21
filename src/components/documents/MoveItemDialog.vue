@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 import AlertMessage from '@/components/common/AlertMessage.vue'
-import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
-import DriveBreadcrumbs from '@/components/documents/DriveBreadcrumbs.vue'
-import type { DriveBreadcrumb, DriveItem } from '@/types'
+import DriveDestinationTree from '@/components/documents/DriveDestinationTree.vue'
+import NameConflictResolver from '@/components/documents/NameConflictResolver.vue'
+import type { DriveDestinationNode, DriveItem, DriveNameConflictResponse } from '@/types'
 
 const props = withDefaults(
   defineProps<{
@@ -16,42 +16,52 @@ const props = withDefaults(
      * captura, no lectura en vivo del listado principal, para no depender
      * de que el usuario no haya navegado entretanto. */
     sourceParentId: string | null
-    // Estado del selector de destino (store `drive-destination`), pasado
-    // como props porque este componente es puramente presentacional.
-    breadcrumbs: DriveBreadcrumb[]
-    folders: DriveItem[]
-    /** Carpeta que se está mostrando ahora mismo en el selector, resuelta a
-     * un id real de Drive (nunca el sentinel `null` de raíz). `null` solo
-     * antes de que termine la primera carga. */
-    destinationId: string | null
-    /** `true` solo cuando `destinationId` es un id verificado y estable —
-     * calculado en el store (`isLoading`/`isLoadingMore`/`error` incluidos),
-     * no solo derivable de las props sueltas de abajo, para que el diálogo
-     * y `DocumentsView.handleMoveSubmit` compartan exactamente el mismo
-     * criterio y no puedan divergir. */
-    isDestinationReady: boolean
-    nextPageToken: string | null
-    isLoading: boolean
-    error?: string
-    isLoadingMore: boolean
-    loadMoreError?: string
+    // Estado del árbol de destino (store `drive-destination`), pasado como
+    // props porque este componente es puramente presentacional.
+    rootNode: DriveDestinationNode | null
+    isLoadingRoot: boolean
+    rootError?: string
+    selectedDestinationId: string | null
+    /** Ruta completa (raíz → seleccionado) del destino elegido, ya
+     * resuelta por el store — vacía si todavía no hay selección. */
+    selectedPath: { id: string; name: string }[]
     isMoving: boolean
     moveError?: string
+    /** Fase 2.6: conflicto estructurado del movimiento en curso — su sola
+     * presencia decide si se muestra el árbol de destino o
+     * `NameConflictResolver`. */
+    conflict: DriveNameConflictResponse | null
   }>(),
-  { error: '', loadMoreError: '', moveError: '' },
+  { rootError: '', moveError: '' },
 )
 
 const emit = defineEmits<{
-  'open-folder': [item: DriveItem]
-  'select-breadcrumb': [index: number]
-  'load-more': []
-  retry: []
+  toggle: [nodeId: string]
+  select: [nodeId: string]
+  'load-more': [nodeId: string]
+  retry: [nodeId: string]
+  'retry-root': []
   submit: []
   cancel: []
+  /** Reenvío tras un conflicto, con `keep_both` (la única resolución que
+   * mover admite) — sin payload: el padre relee el mismo elemento y destino
+   * ya elegidos (`item`, `sourceParentId`, `selectedDestinationId`), igual
+   * que hace el `submit` inicial. */
+  'resolve-keep-both': []
+  /** "Volver" del resolver: cancela solo la resolución, nunca el diálogo
+   * completo — el padre limpia `conflict` (vía `resetMoveState`) y este
+   * componente vuelve a mostrar el árbol; su estado (expansión, selección)
+   * no se ha tocado en ningún momento, así que reaparece tal cual estaba. */
+  'conflict-back': []
 }>()
+
+// El elemento que se mueve es siempre el nodo excluido del árbol — no hace
+// falta una prop aparte, `item` ya lo lleva.
+const excludedItemId = computed(() => props.item?.id ?? null)
 
 const dialogEl = ref<HTMLDialogElement>()
 const cancelButton = ref<HTMLButtonElement>()
+const conflictResolverRef = ref<InstanceType<typeof NameConflictResolver>>()
 
 // Mismo mecanismo que el resto de diálogos: distingue un cierre provocado
 // por nosotros mismos (al reaccionar a `open` pasando a false) de uno
@@ -64,7 +74,7 @@ watch(
     if (open) {
       dialogEl.value?.showModal()
       await nextTick()
-      // El contenido varía según el estado del selector (cargando, error,
+      // El contenido varía según el estado del árbol (cargando, error,
       // listado) así que no hay un control inicial estable dentro de él;
       // "Cancelar" está presente en los tres casos.
       cancelButton.value?.focus()
@@ -97,48 +107,78 @@ function handleBackdropClick(event: MouseEvent) {
   }
 }
 
-// El selector queda bloqueado por completo mientras se mueve: ni navegar a
-// otra carpeta del destino, ni paginar, ni reintentar tiene sentido cuando
-// la operación ya está en curso.
-function handleSelectBreadcrumb(index: number) {
+// El árbol queda bloqueado por completo mientras se mueve: ni expandir,
+// seleccionar, paginar ni reintentar tiene sentido cuando la operación ya
+// está en curso.
+function handleToggle(nodeId: string) {
   if (props.isMoving) return
-  emit('select-breadcrumb', index)
+  emit('toggle', nodeId)
 }
 
-function handleOpenFolder(folder: DriveItem) {
-  if (props.isMoving || folder.id === props.item?.id) return
-  emit('open-folder', folder)
-}
-
-function handleLoadMore() {
-  if (props.isMoving || props.isLoadingMore || !props.nextPageToken) return
-  emit('load-more')
-}
-
-function handleRetry() {
+function handleSelect(nodeId: string) {
   if (props.isMoving) return
-  emit('retry')
+  emit('select', nodeId)
 }
 
-// Fuente única de verdad de si "Mover aquí" puede activarse: bloquea un
-// movimiento en curso, un destino todavía no verificado o inestable
-// (`isDestinationReady` ya cubre "sin rootFolderId todavía", "cargando
-// inicialmente", "navegando a otra carpeta", "paginando" y "la carga de la
-// carpeta actual falló"), el mismo padre actual (no cambiaría nada) y el
-// propio elemento (solo alcanzable de forma defensiva — el listado ya
-// deshabilita e impide entrar en esa carpeta).
+function handleLoadMore(nodeId: string) {
+  if (props.isMoving) return
+  emit('load-more', nodeId)
+}
+
+function handleRetry(nodeId: string) {
+  if (props.isMoving) return
+  emit('retry', nodeId)
+}
+
+function handleRetryRoot() {
+  if (props.isMoving) return
+  emit('retry-root')
+}
+
+// Fuente única de verdad de si "Mover aquí" puede activarse: un movimiento
+// en curso, ninguna selección todavía, o (de forma defensiva — el árbol ya
+// deshabilita esas filas) el mismo padre actual o el propio elemento como
+// destino.
 const canSubmit = computed(() => {
   if (props.isMoving) return false
-  if (!props.isDestinationReady) return false
-  if (!props.item || !props.destinationId) return false
-  if (props.destinationId === props.sourceParentId) return false
-  if (props.destinationId === props.item.id) return false
+  if (!props.item || !props.selectedDestinationId) return false
+  if (props.selectedDestinationId === props.sourceParentId) return false
+  if (props.selectedDestinationId === props.item.id) return false
   return true
 })
 
-const isAlreadyHere = computed(
-  () => props.destinationId !== null && props.destinationId === props.sourceParentId,
+const selectedPathLabel = computed(() => props.selectedPath.map((node) => node.name).join(' / '))
+
+// Fase 2.6: al aparecer un conflicto, el foco pasa al título del bloque de
+// resolución; al desaparecer (por "Volver" o por una nueva petición que ya
+// no lo reproduce) vuelve a "Cancelar" — el mismo anclaje estable que ya usa
+// la apertura inicial del diálogo, porque el árbol no tiene un control de
+// destino único y fijo al que volver (nodo expandido/seleccionado, según lo
+// que hubiera antes del conflicto).
+watch(
+  () => props.conflict,
+  async (conflict, previousConflict) => {
+    if (!props.open) return
+    if (conflict) {
+      await nextTick()
+      await conflictResolverRef.value?.focusTitle()
+    } else if (previousConflict) {
+      await nextTick()
+      cancelButton.value?.focus()
+    }
+  },
 )
+
+// Reenvío de una decisión explícita: sin payload, el padre relee el mismo
+// elemento y destino ya elegidos. Mover solo admite `keep_both` (nunca
+// `replace`).
+function handleKeepBoth() {
+  emit('resolve-keep-both')
+}
+
+function handleConflictBack() {
+  emit('conflict-back')
+}
 </script>
 
 <template>
@@ -156,49 +196,40 @@ const isAlreadyHere = computed(
       </h2>
       <p class="move-item-dialog__subtitle">{{ item?.isFolder ? 'Carpeta' : 'Archivo' }}</p>
 
-      <p class="move-item-dialog__section-label">Selecciona la carpeta de destino:</p>
-      <DriveBreadcrumbs :breadcrumbs="breadcrumbs" @select="handleSelectBreadcrumb" />
-
-      <LoadingSpinner v-if="isLoading" label="Cargando carpetas…" />
-
-      <div v-else-if="error" class="move-item-dialog__error">
-        <AlertMessage variant="error">{{ error }}</AlertMessage>
-        <button type="button" class="move-item-dialog__retry" @click="handleRetry">
-          Reintentar
-        </button>
-      </div>
+      <NameConflictResolver
+        v-if="conflict"
+        ref="conflictResolverRef"
+        :conflicts="conflict.conflicts"
+        :allowed-resolutions="conflict.allowedResolutions"
+        operation="move"
+        :busy="isMoving"
+        @keep-both="handleKeepBoth"
+        @cancel="handleConflictBack"
+      />
 
       <template v-else>
-        <ul v-if="folders.length > 0" class="move-item-dialog__folders">
-          <li v-for="folder in folders" :key="folder.id">
-            <button
-              type="button"
-              class="move-item-dialog__folder"
-              :disabled="isMoving || folder.id === item?.id"
-              :title="folder.id === item?.id ? 'No puedes mover un elemento dentro de sí mismo.' : undefined"
-              @click="handleOpenFolder(folder)"
-            >
-              {{ folder.name }}
-            </button>
-          </li>
-        </ul>
-        <p v-else class="move-item-dialog__empty">No hay subcarpetas aquí.</p>
+        <p class="move-item-dialog__section-label">Selecciona la carpeta de destino:</p>
 
-        <AlertMessage v-if="loadMoreError" variant="error">{{ loadMoreError }}</AlertMessage>
+        <DriveDestinationTree
+          :root-node="rootNode"
+          :is-loading-root="isLoadingRoot"
+          :root-error="rootError"
+          :selected-destination-id="selectedDestinationId"
+          :source-parent-id="sourceParentId"
+          :excluded-item-id="excludedItemId"
+          @toggle="handleToggle"
+          @select="handleSelect"
+          @load-more="handleLoadMore"
+          @retry="handleRetry"
+          @retry-root="handleRetryRoot"
+        />
 
-        <button
-          v-if="nextPageToken"
-          type="button"
-          class="move-item-dialog__load-more"
-          :disabled="isMoving || isLoadingMore"
-          :aria-busy="isLoadingMore"
-          @click="handleLoadMore"
-        >
-          {{ isLoadingMore ? 'Cargando…' : 'Cargar más' }}
-        </button>
+        <p v-if="selectedPath.length > 0" class="move-item-dialog__destination">
+          <span class="move-item-dialog__destination-label">Destino:</span>
+          {{ selectedPathLabel }}
+        </p>
+        <p v-else class="move-item-dialog__hint">Todavía no has seleccionado ninguna carpeta.</p>
       </template>
-
-      <p v-if="isAlreadyHere" class="move-item-dialog__hint">Este elemento ya está en esta carpeta.</p>
 
       <AlertMessage v-if="moveError" variant="error">{{ moveError }}</AlertMessage>
 
@@ -213,6 +244,7 @@ const isAlreadyHere = computed(
           Cancelar
         </button>
         <button
+          v-if="!conflict"
           type="button"
           class="move-item-dialog__confirm"
           :disabled="!canSubmit"
@@ -232,7 +264,7 @@ const isAlreadyHere = computed(
   border-radius: var(--radius-lg);
   padding: 0;
   box-shadow: var(--shadow-md);
-  max-width: min(90vw, 30rem);
+  max-width: min(94vw, 32rem);
   width: 100%;
 }
 
@@ -247,8 +279,9 @@ const isAlreadyHere = computed(
   gap: 0.75rem;
   background: var(--bg-surface);
   border-radius: var(--radius-lg);
-  max-height: 85vh;
+  max-height: 90vh;
   overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .move-item-dialog__title {
@@ -272,95 +305,25 @@ const isAlreadyHere = computed(
   color: var(--text-secondary);
 }
 
-.move-item-dialog__error {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 0.75rem;
-}
-
-.move-item-dialog__retry {
-  min-height: 44px;
-  padding: 0.5rem 1.1rem;
-  border-radius: var(--radius-sm);
-  font-size: 0.9rem;
-  font-weight: 600;
-  cursor: pointer;
-  border: none;
-  background: var(--accent);
-  color: white;
-}
-
-.move-item-dialog__retry:hover {
-  background: var(--accent-hover);
-}
-
-.move-item-dialog__folders {
-  list-style: none;
+.move-item-dialog__destination {
   margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0.3rem;
-  max-height: 14rem;
-  overflow-y: auto;
-}
-
-.move-item-dialog__folder {
-  width: 100%;
-  min-height: 44px;
   padding: 0.5rem 0.75rem;
   border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: var(--bg-surface);
-  color: var(--text-primary);
-  font-size: 0.9rem;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: 0.85rem;
   font-weight: 600;
-  text-align: left;
-  cursor: pointer;
   overflow-wrap: anywhere;
 }
 
-.move-item-dialog__folder:hover:not(:disabled) {
-  background: var(--bg-hover);
-}
-
-.move-item-dialog__folder:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-
-.move-item-dialog__empty {
-  margin: 0;
-  padding: 0.5rem 0;
-  font-size: 0.88rem;
-  color: var(--text-secondary);
-}
-
-.move-item-dialog__load-more {
-  align-self: flex-start;
-  min-height: 44px;
-  padding: 0.5rem 1rem;
-  border-radius: var(--radius-sm);
-  font-size: 0.85rem;
-  font-weight: 600;
-  cursor: pointer;
-  border: 1px solid var(--border-strong);
-  background: var(--bg-surface);
-  color: var(--text-primary);
-}
-
-.move-item-dialog__load-more:hover:not(:disabled) {
-  background: var(--bg-hover);
-}
-
-.move-item-dialog__load-more:disabled {
-  opacity: 0.65;
-  cursor: not-allowed;
+.move-item-dialog__destination-label {
+  font-weight: 700;
+  margin-right: 0.3rem;
 }
 
 .move-item-dialog__hint {
   margin: 0;
+  padding: 0.5rem 0.75rem;
   font-size: 0.85rem;
   color: var(--text-muted);
 }
@@ -407,5 +370,15 @@ const isAlreadyHere = computed(
 .move-item-dialog__confirm:disabled {
   opacity: 0.65;
   cursor: not-allowed;
+}
+
+@media (max-width: 480px) {
+  .move-item-dialog {
+    max-width: 100vw;
+  }
+
+  .move-item-dialog__box {
+    padding: 1.1rem;
+  }
 }
 </style>

@@ -4,6 +4,7 @@ import { isAxiosError } from 'axios'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import AlertMessage from '@/components/common/AlertMessage.vue'
+import ThemeToggle from '@/components/common/ThemeToggle.vue'
 
 interface FieldErrors {
   identifier?: string
@@ -68,7 +69,11 @@ async function handleSubmit() {
 
 <template>
   <div class="login-page">
+    <div class="login-page__theme-toggle">
+      <ThemeToggle />
+    </div>
     <form class="login-card" novalidate @submit.prevent="handleSubmit">
+      <img src="/fragua47docs.png" alt="Logotipo de Fragua 47" class="login-card__logo" />
       <h1 class="login-card__title">Fragua Documentos</h1>
       <p class="login-card__subtitle">Accede con tu cuenta de Fragua</p>
 
@@ -119,12 +124,19 @@ async function handleSubmit() {
 
 <style scoped>
 .login-page {
+  position: relative;
   min-height: 100vh;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 1.5rem;
   background: var(--bg-base);
+}
+
+.login-page__theme-toggle {
+  position: fixed;
+  top: 1rem;
+  right: 1rem;
 }
 
 .login-card {
@@ -138,6 +150,13 @@ async function handleSubmit() {
   display: flex;
   flex-direction: column;
   gap: 1.1rem;
+}
+
+.login-card__logo {
+  width: min(10rem, 48vw);
+  height: auto;
+  align-self: center;
+  margin: -0.45rem 0 -0.35rem;
 }
 
 .login-card__title {

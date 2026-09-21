@@ -1,39 +1,38 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { isAxiosError } from 'axios'
-import { driveDocumentsService, sanitizeFileName } from '@/services/drive-documents.service'
-import type { DriveBreadcrumb, DriveErrorCode, DriveItem } from '@/types'
+import {
+  driveDocumentsService,
+  extractDriveNameConflict,
+  sanitizeFileName,
+} from '@/services/drive-documents.service'
+import type {
+  DriveBreadcrumb,
+  DriveConflictResolution,
+  DriveErrorCode,
+  DriveItem,
+  DriveNameConflictResponse,
+} from '@/types'
+import { describeDriveConnectionError } from '@/utils/drive-connection-error'
 
 const ROOT_BREADCRUMB: DriveBreadcrumb = { id: null, name: 'Raíz' }
 
-/** 409/503 son sobre la conexión con Google Drive en sí, no sobre la
- * operación concreta — el mensaje es el mismo se esté listando o creando. */
-function describeDriveConnectionError(
-  status: number | undefined,
-  code: string | undefined,
-): { message: string; code: DriveErrorCode } | null {
-  if (status === 409 && code === 'DRIVE_NOT_CONNECTED') {
-    return {
-      message: 'Google Drive no está conectado. Pide a un superadmin que lo conecte desde Ajustes.',
-      code: 'DRIVE_NOT_CONNECTED',
-    }
-  }
-  if (status === 409 && code === 'DRIVE_RECONNECT_REQUIRED') {
-    return {
-      message:
-        'La conexión con Google Drive necesita reconectarse. Pide a un superadmin que la restablezca desde Ajustes.',
-      code: 'DRIVE_RECONNECT_REQUIRED',
-    }
-  }
-  if (status === 503) {
-    return {
-      message:
-        'Google Drive no está disponible en este momento. Es un problema temporal — inténtalo de nuevo en unos segundos.',
-      code: 'DRIVE_UNAVAILABLE',
-    }
-  }
-  return null
-}
+/**
+ * Resultado de una operación con conflicto de nombre (fase 2.6: subida,
+ * renombrado, movimiento) — sustituye al `boolean` que devolvían antes de
+ * esta fase, porque ahora hay tres desenlaces posibles en vez de dos:
+ * - `'success'`: la operación (primer intento o resolución) terminó en
+ *   Drive con éxito — el diálogo debe cerrarse.
+ * - `'conflict'`: el backend respondió `409 DRIVE_NAME_CONFLICT` — no es un
+ *   fallo, el diálogo permanece abierto mostrando el conflicto estructurado
+ *   (`uploadConflict`/`renameConflict`/`moveConflict`), nunca un error.
+ * - `'error'`: un fallo real — el diálogo permanece abierto mostrando el
+ *   mensaje contextual de siempre (`uploadError`/`renameError`/`moveError`).
+ * - `'blocked'`: la llamada no llegó a intentarse porque ya había una del
+ *   mismo tipo en curso — ningún estado cambia, el llamador no hace nada
+ *   (mismo criterio que el `false` de reentrada anterior a esta fase).
+ */
+export type DriveConflictOutcome = 'success' | 'conflict' | 'error' | 'blocked'
 
 function describeError(err: unknown): { message: string; code: DriveErrorCode | null } {
   if (isAxiosError(err)) {
@@ -154,6 +153,51 @@ function describeDownloadError(err: unknown): { message: string; code: DriveErro
   return { message: 'No se ha podido descargar el archivo.', code: null }
 }
 
+/** Mismos códigos de conexión que `describeError`, más los específicos de
+ * `POST /drive/files/:id/versions` — comparte los códigos de validación de
+ * archivo con `describeUploadError` (mismo límite y las mismas reglas de
+ * archivo requerido/vacío/nombre/tamaño) y añade `DRIVE_FILE_REPLACE_NOT_SUPPORTED`
+ * (carpetas y documentos nativos de Google no admiten nueva versión — la UI
+ * ya evita ofrecer el botón en esos casos, así que este código solo debería
+ * llegar de forma defensiva) y 404 (el archivo ya no existe o está fuera de
+ * la raíz). */
+function describeReplaceError(err: unknown): { message: string; code: DriveErrorCode | null } {
+  if (isAxiosError(err)) {
+    const status = err.response?.status
+    const code = (err.response?.data as { code?: string } | undefined)?.code
+    const connectionError = describeDriveConnectionError(status, code)
+    if (connectionError) return connectionError
+    if (code === 'DRIVE_FILE_REQUIRED') {
+      return { message: 'No se ha seleccionado ningún archivo.', code: 'DRIVE_FILE_REQUIRED' }
+    }
+    if (code === 'DRIVE_FILE_EMPTY') {
+      return { message: 'El archivo está vacío.', code: 'DRIVE_FILE_EMPTY' }
+    }
+    if (code === 'DRIVE_FILE_NAME_INVALID') {
+      return { message: 'El nombre del archivo no es válido.', code: 'DRIVE_FILE_NAME_INVALID' }
+    }
+    if (code === 'DRIVE_FILE_TOO_LARGE') {
+      return {
+        message: 'El archivo supera el límite de tamaño permitido.',
+        code: 'DRIVE_FILE_TOO_LARGE',
+      }
+    }
+    if (code === 'DRIVE_UPLOAD_ERROR') {
+      return { message: 'No se ha podido procesar el archivo subido.', code: 'DRIVE_UPLOAD_ERROR' }
+    }
+    if (code === 'DRIVE_FILE_REPLACE_NOT_SUPPORTED') {
+      return {
+        message: 'Este elemento no admite subir una nueva versión.',
+        code: 'DRIVE_FILE_REPLACE_NOT_SUPPORTED',
+      }
+    }
+    if (status === 404) {
+      return { message: 'Este archivo ya no existe o no está disponible.', code: null }
+    }
+  }
+  return { message: 'No se ha podido subir la nueva versión.', code: null }
+}
+
 /** Mismos códigos de conexión que `describeError`, más los propios de
  * `PATCH /drive/items/:id/move`: `DRIVE_MOVE_INVALID` (mover una carpeta
  * dentro de sí misma o de una de sus descendientes — el selector de destino
@@ -187,6 +231,32 @@ function describeMoveError(err: unknown): { message: string; code: DriveErrorCod
   return { message: 'No se ha podido mover el elemento.', code: null }
 }
 
+/** Mismos códigos de conexión que `describeError`, más los propios de
+ * `POST /drive/items/:id/trash`: `DRIVE_TRASH_NOT_CONFIRMED` (502 — Google no
+ * confirmó el envío a la papelera, así que el elemento puede no haberse
+ * movido de verdad y no se retira del listado) y 404 (el elemento ya no
+ * existe o no está disponible). El 401 queda en manos del interceptor global
+ * de la API, igual que en el resto de operaciones. */
+function describeTrashError(err: unknown): { message: string; code: DriveErrorCode | null } {
+  if (isAxiosError(err)) {
+    const status = err.response?.status
+    const code = (err.response?.data as { code?: string } | undefined)?.code
+    const connectionError = describeDriveConnectionError(status, code)
+    if (connectionError) return connectionError
+    if (code === 'DRIVE_TRASH_NOT_CONFIRMED') {
+      return {
+        message:
+          'Google no ha confirmado el envío a la papelera. Puede que no se haya completado — inténtalo de nuevo.',
+        code: 'DRIVE_TRASH_NOT_CONFIRMED',
+      }
+    }
+    if (status === 404) {
+      return { message: 'Este elemento ya no existe o no está disponible.', code: null }
+    }
+  }
+  return { message: 'No se ha podido enviar el elemento a la papelera.', code: null }
+}
+
 export const useDriveDocumentsStore = defineStore('drive-documents', () => {
   const breadcrumbs = ref<DriveBreadcrumb[]>([ROOT_BREADCRUMB])
   const items = ref<DriveItem[]>([])
@@ -215,6 +285,10 @@ export const useDriveDocumentsStore = defineStore('drive-documents', () => {
 
   const isUploading = ref(false)
   const uploadError = ref('')
+  // Fase 2.6: conflicto estructurado de la subida en curso — nunca conviven
+  // con `uploadError`, uno de los dos siempre queda vacío/`null` tras cada
+  // intento (ver `uploadFile`).
+  const uploadConflict = ref<DriveNameConflictResponse | null>(null)
 
   const downloadingFileId = ref<string | null>(null)
   const downloadError = ref('')
@@ -222,10 +296,20 @@ export const useDriveDocumentsStore = defineStore('drive-documents', () => {
   const isRenaming = ref(false)
   const renamingItemId = ref<string | null>(null)
   const renameError = ref('')
+  const renameConflict = ref<DriveNameConflictResponse | null>(null)
 
   const isMoving = ref(false)
   const movingItemId = ref<string | null>(null)
   const moveError = ref('')
+  const moveConflict = ref<DriveNameConflictResponse | null>(null)
+
+  const isReplacing = ref(false)
+  const replacingFileId = ref<string | null>(null)
+  const replaceError = ref('')
+
+  const isTrashing = ref(false)
+  const trashingItemId = ref<string | null>(null)
+  const trashError = ref('')
 
   const currentFolderId = computed(
     () => breadcrumbs.value[breadcrumbs.value.length - 1]?.id ?? null,
@@ -439,45 +523,98 @@ export const useDriveDocumentsStore = defineStore('drive-documents', () => {
     }
   }
 
-  /** Limpia el error de una subida anterior — llamada al abrir el diálogo,
-   * para no arrastrar el mensaje de un intento previo. */
+  /** Limpia el error y el conflicto de una subida anterior — llamada al
+   * abrir el diálogo, para no arrastrar el mensaje o el conflicto de un
+   * intento previo. */
   function resetUploadState() {
     uploadError.value = ''
+    uploadConflict.value = null
   }
 
   /**
-   * Mismo criterio que `createFolder`: `true` solo si el archivo se subió
-   * realmente a Drive (el diálogo debe cerrarse); `false` si está bloqueado
-   * por un envío duplicado o si la subida falló (el diálogo permanece
-   * abierto conservando el archivo elegido).
+   * `'blocked'` si ya había una subida en curso (mismo criterio que el
+   * `false` de reentrada anterior a esta fase): el llamador no hace nada.
+   * En cualquier otro caso se intenta de verdad; `conflictResolution` y
+   * `conflictItemId` solo llegan rellenos al reenviar una decisión explícita
+   * tras un `409 DRIVE_NAME_CONFLICT` anterior (`uploadConflict`) — la
+   * primera petición de cada intento de subida siempre los omite.
+   *
+   * Al empezar, se limpian tanto `uploadError` como `uploadConflict`: cada
+   * nueva petición (primer intento o reenvío) parte sin arrastrar el
+   * resultado del intento anterior.
+   *
+   * `'success'` solo si el archivo se subió realmente a Drive (el diálogo
+   * debe cerrarse). `'conflict'` si el backend respondió con
+   * `DRIVE_NAME_CONFLICT` — no es un fallo: se guarda el cuerpo estructurado
+   * en `uploadConflict` (nunca en `uploadError`) y el diálogo permanece
+   * abierto mostrando la resolución, con el mismo `file`/carpeta que ya
+   * tenía. `'error'` en cualquier otro fallo real, mostrado en `uploadError`
+   * como siempre.
+   *
+   * El conflicto (o el error) solo se escribe si la navegación no cambió
+   * mientras la petición estaba en curso (`navigationSeq` capturado al
+   * empezar, igual que `renameItem`/`moveItem`) — una respuesta obsoleta
+   * nunca puede hacer aparecer un conflicto sobre la carpeta o el diálogo
+   * equivocados.
+   *
+   * `uploadConflict` deliberadamente no se limpia antes de intentar la
+   * petición (a diferencia de `uploadError`): si esta llamada es un reenvío
+   * (`conflictResolution` relleno), el conflicto anterior es lo que el
+   * diálogo sigue mostrando mientras `isUploading` bloquea sus controles, y
+   * limpiarlo aquí lo haría desaparecer un instante — cayendo al
+   * formulario y moviendo el foco — antes de que la petición siquiera
+   * responda. Solo se sustituye por uno nuevo o se limpia una vez se conoce
+   * el desenlace real, dentro del `try`/`catch`. En una petición sin
+   * resolución (primer intento, o tras "Volver") no hay nada que limpiar de
+   * todas formas: ambos caminos ya lo dejan a `null` de antemano
+   * (`resetUploadState`).
    *
    * Al subirse con éxito, si `currentFolderId` sigue siendo la carpeta a la
    * que se subió, se espera la recarga de esa misma carpeta antes de
    * resolver — sin tocar `breadcrumbs` — y `isUploading` no vuelve a `false`
-   * hasta que esa recarga termina (vía `finally`). Un fallo de la recarga
-   * se refleja únicamente en `error`/`errorCode` (el mecanismo normal de
-   * navegación, con su propio reintento) y nunca en `uploadError`: el
-   * archivo ya se subió, así que no debe parecer que la subida falló ni
-   * invitar a repetirla.
+   * hasta que esa recarga termina (vía `finally`). El `DriveItem` devuelto
+   * por un `'replace'` puede tener un `id` distinto al de una subida nueva
+   * (es el archivo reemplazado); no hace falta incorporarlo a mano por
+   * `id` porque la recarga completa de la carpeta ya refleja el listado
+   * real, sin duplicarlo. Un fallo de esa recarga se refleja únicamente en
+   * `error`/`errorCode` (el mecanismo normal de navegación, con su propio
+   * reintento) y nunca en `uploadError`: el archivo ya se subió, así que no
+   * debe parecer que la subida falló ni invitar a repetirla.
    */
-  async function uploadFile(file: File): Promise<boolean> {
-    if (isUploading.value) return false
+  async function uploadFile(
+    file: File,
+    conflictResolution?: DriveConflictResolution,
+    conflictItemId?: string,
+  ): Promise<DriveConflictOutcome> {
+    if (isUploading.value) return 'blocked'
 
     const parentId = currentFolderId.value
+    const navigationId = navigationSeq
     isUploading.value = true
     uploadError.value = ''
 
     try {
-      await driveDocumentsService.uploadFile({ file, parentId: parentId ?? undefined })
+      await driveDocumentsService.uploadFile({
+        file,
+        parentId: parentId ?? undefined,
+        conflictResolution,
+        conflictItemId,
+      })
       if (currentFolderId.value === parentId) {
         // `loadFolder` nunca rechaza, así que esperarla aquí no puede hacer
         // caer este `try` en el `catch` de subida.
         await loadFolder(parentId)
       }
-      return true
+      if (navigationSeq === navigationId) uploadConflict.value = null
+      return 'success'
     } catch (err) {
+      const conflict = extractDriveNameConflict(err)
+      if (navigationSeq === navigationId) {
+        uploadConflict.value = conflict
+      }
+      if (conflict) return 'conflict'
       uploadError.value = describeUploadError(err).message
-      return false
+      return 'error'
     } finally {
       isUploading.value = false
     }
@@ -531,19 +668,41 @@ export const useDriveDocumentsStore = defineStore('drive-documents', () => {
     }
   }
 
-  /** Limpia el error de un intento de renombrado anterior — llamada al abrir
-   * el diálogo, para no arrastrar el mensaje de un intento previo. */
+  /** Limpia el error y el conflicto de un intento de renombrado anterior —
+   * llamada al abrir el diálogo, para no arrastrar el mensaje o el
+   * conflicto de un intento previo. */
   function resetRenameState() {
     renameError.value = ''
+    renameConflict.value = null
   }
 
   /**
-   * Mismo criterio que `createFolder`/`uploadFile`: `true` solo si el
-   * elemento se renombró realmente en Drive (el diálogo debe cerrarse);
-   * `false` si está bloqueado por un envío duplicado (solo se permite un
-   * renombrado a la vez, igual que las descargas) o si el renombrado falló
-   * (el diálogo debe permanecer abierto conservando el nombre introducido y
-   * mostrando `renameError`).
+   * `'blocked'` si ya había un renombrado en curso (solo se permite uno a la
+   * vez, igual que las descargas): el llamador no hace nada. En cualquier
+   * otro caso se intenta de verdad; `conflictResolution` solo llega relleno
+   * (siempre `'keep_both'` — el backend rechaza `'replace'` aquí) al
+   * reenviar una decisión explícita tras un `409 DRIVE_NAME_CONFLICT`
+   * anterior (`renameConflict`) — la primera petición de cada intento
+   * siempre lo omite.
+   *
+   * Al empezar se limpia `renameError`. `renameConflict` deliberadamente no
+   * se toca todavía en ese punto: si esta llamada es un reenvío
+   * (`conflictResolution` relleno), es el conflicto que el diálogo sigue
+   * mostrando mientras `isRenaming` bloquea sus controles, y limpiarlo aquí
+   * lo haría desaparecer un instante — cayendo al formulario y moviendo el
+   * foco — antes de que la petición siquiera responda. Solo se sustituye o
+   * se limpia una vez se conoce el desenlace real, dentro del `try`/`catch`.
+   * En una petición sin resolución (primer intento, o tras "Volver") no hay
+   * nada que limpiar de todas formas: ambos caminos ya lo dejan a `null` de
+   * antemano (`resetRenameState`).
+   *
+   * `'success'` solo si el elemento se renombró realmente en Drive (el
+   * diálogo debe cerrarse). `'conflict'` si el backend respondió con
+   * `DRIVE_NAME_CONFLICT` — no es un fallo: se guarda el cuerpo estructurado
+   * en `renameConflict` (nunca en `renameError`) y el diálogo permanece
+   * abierto mostrando la resolución, con el mismo nombre introducido.
+   * `'error'` en cualquier otro fallo real, mostrado en `renameError` como
+   * siempre.
    *
    * Al renombrarse con éxito, el `DriveItem` que devuelve el backend
    * sustituye al original dentro de `items` por `id` — sin recargar la
@@ -552,11 +711,18 @@ export const useDriveDocumentsStore = defineStore('drive-documents', () => {
    * contexto de navegación (`navigationSeq` capturado al empezar, igual que
    * `downloadFile`): si navegó a otra carpeta mientras la petición estaba en
    * curso, el listado visible ya pertenece a otra carpeta y no debe
-   * tocarse. El renombrado se considera un éxito en cualquier caso — ya
-   * ocurrió en Drive — así que el diálogo siempre se cierra.
+   * tocarse. Ese mismo `navigationId` guarda también el conflicto: una
+   * respuesta obsoleta nunca puede hacer aparecer un conflicto sobre la
+   * carpeta o el diálogo equivocados. El renombrado se considera un éxito en
+   * cualquier caso — ya ocurrió en Drive — así que el diálogo siempre se
+   * cierra.
    */
-  async function renameItem(item: DriveItem, name: string): Promise<boolean> {
-    if (isRenaming.value) return false
+  async function renameItem(
+    item: DriveItem,
+    name: string,
+    conflictResolution?: DriveConflictResolution,
+  ): Promise<DriveConflictOutcome> {
+    if (isRenaming.value) return 'blocked'
 
     const navigationId = navigationSeq
     isRenaming.value = true
@@ -564,59 +730,93 @@ export const useDriveDocumentsStore = defineStore('drive-documents', () => {
     renameError.value = ''
 
     try {
-      const renamed = await driveDocumentsService.renameItem(item.id, name)
+      const renamed = await driveDocumentsService.renameItem(item.id, name, conflictResolution)
       if (navigationSeq === navigationId) {
         const index = items.value.findIndex((current) => current.id === item.id)
         if (index !== -1) {
           items.value = [...items.value.slice(0, index), renamed, ...items.value.slice(index + 1)]
         }
+        renameConflict.value = null
       }
-      return true
+      return 'success'
     } catch (err) {
+      const conflict = extractDriveNameConflict(err)
+      if (navigationSeq === navigationId) {
+        renameConflict.value = conflict
+      }
+      if (conflict) return 'conflict'
       renameError.value = describeRenameError(err).message
-      return false
+      return 'error'
     } finally {
       isRenaming.value = false
       renamingItemId.value = null
     }
   }
 
-  /** Limpia el error de un intento de movimiento anterior — llamada al abrir
-   * el diálogo, para no arrastrar el mensaje de un intento previo. */
+  /** Limpia el error y el conflicto de un intento de movimiento anterior —
+   * llamada al abrir el diálogo, para no arrastrar el mensaje o el
+   * conflicto de un intento previo. */
   function resetMoveState() {
     moveError.value = ''
+    moveConflict.value = null
   }
 
   /**
    * Mueve `item` a la carpeta `destinationId`, conocida la carpeta en la
-   * que se encontraba (`sourceParentId`) cuando se abrió el diálogo. `true`
-   * solo si el elemento se movió realmente en Drive (el diálogo debe
-   * cerrarse); `false` si está bloqueado por un envío duplicado (solo se
-   * permite un movimiento a la vez, igual que renombrados y descargas), si
-   * el destino es el mismo padre actual o el propio elemento — el selector
-   * ya debería impedir llegar a proponer cualquiera de los dos; esto es
-   * solo la misma defensa que ya aplican `handleDownloadClick`/
-   * `handleRenameClick` contra un `:disabled` que no llegó a tiempo — o si
-   * el movimiento falló (el diálogo permanece abierto mostrando
-   * `moveError`).
+   * que se encontraba (`sourceParentId`) cuando se abrió el diálogo.
+   * `'blocked'` si ya había un movimiento en curso (solo se permite uno a la
+   * vez, igual que renombrados y descargas), o si el destino es el mismo
+   * padre actual o el propio elemento — el selector ya debería impedir
+   * llegar a proponer cualquiera de los dos; esto es solo la misma defensa
+   * que ya aplican `handleDownloadClick`/`handleRenameClick` contra un
+   * `:disabled` que no llegó a tiempo. En cualquiera de estos casos el
+   * llamador no hace nada. `conflictResolution` solo llega relleno (siempre
+   * `'keep_both'` — el backend rechaza `'replace'` aquí) al reenviar una
+   * decisión explícita tras un `409 DRIVE_NAME_CONFLICT` anterior
+   * (`moveConflict`) — la primera petición de cada intento siempre lo omite.
+   *
+   * Al empezar, se limpian tanto `moveError` como `moveConflict`: cada
+   * nueva petición parte sin arrastrar el resultado del intento anterior.
+   *
+   * `'success'` solo si el elemento se movió realmente en Drive (el diálogo
+   * debe cerrarse). `'conflict'` si el backend respondió con
+   * `DRIVE_NAME_CONFLICT` — no es un fallo: se guarda el cuerpo estructurado
+   * en `moveConflict` (nunca en `moveError`) y el diálogo permanece abierto
+   * mostrando la resolución, con el mismo árbol y destino ya elegidos.
+   * `'error'` en cualquier otro fallo real, mostrado en `moveError` como
+   * siempre.
+   *
+   * Al empezar se limpia `moveError`. `moveConflict` deliberadamente no se
+   * toca todavía en ese punto: si esta llamada es un reenvío
+   * (`conflictResolution` relleno), es el conflicto que el diálogo sigue
+   * mostrando mientras `isMoving` bloquea sus controles, y limpiarlo aquí lo
+   * haría desaparecer un instante — cayendo al árbol y moviendo el foco —
+   * antes de que la petición siquiera responda. Solo se sustituye o se
+   * limpia una vez se conoce el desenlace real, dentro del `try`/`catch`. En
+   * una petición sin resolución (primer intento, o tras "Volver") no hay
+   * nada que limpiar de todas formas: ambos caminos ya lo dejan a `null` de
+   * antemano (`resetMoveState`).
    *
    * Al moverse con éxito, si el usuario sigue en el mismo contexto de
    * navegación que cuando se inició (`navigationSeq` capturado al empezar,
    * igual que `downloadFile`/`renameItem`) el elemento se retira de `items`
    * por `id` — sin recargar la carpeta, sin tocar `breadcrumbs` ni
-   * `nextPageToken`. Si navegó a otro sitio mientras la petición estaba en
-   * curso, el listado visible ya pertenece a otra carpeta y no debe
-   * tocarse; el movimiento se considera un éxito en cualquier caso — ya
-   * ocurrió en Drive.
+   * `nextPageToken`. Ese mismo `navigationId` guarda también el conflicto:
+   * una respuesta obsoleta nunca puede hacer aparecer un conflicto sobre la
+   * carpeta o el diálogo equivocados. Si navegó a otro sitio mientras la
+   * petición estaba en curso, el listado visible ya pertenece a otra
+   * carpeta y no debe tocarse; el movimiento se considera un éxito en
+   * cualquier caso — ya ocurrió en Drive.
    */
   async function moveItem(
     item: DriveItem,
     destinationId: string,
     sourceParentId: string,
-  ): Promise<boolean> {
-    if (isMoving.value) return false
-    if (destinationId === sourceParentId) return false
-    if (destinationId === item.id) return false
+    conflictResolution?: DriveConflictResolution,
+  ): Promise<DriveConflictOutcome> {
+    if (isMoving.value) return 'blocked'
+    if (destinationId === sourceParentId) return 'blocked'
+    if (destinationId === item.id) return 'blocked'
 
     const navigationId = navigationSeq
     isMoving.value = true
@@ -624,17 +824,149 @@ export const useDriveDocumentsStore = defineStore('drive-documents', () => {
     moveError.value = ''
 
     try {
-      await driveDocumentsService.moveItem(item.id, destinationId)
+      await driveDocumentsService.moveItem(item.id, destinationId, conflictResolution)
+      if (navigationSeq === navigationId) {
+        items.value = items.value.filter((current) => current.id !== item.id)
+        moveConflict.value = null
+      }
+      return 'success'
+    } catch (err) {
+      const conflict = extractDriveNameConflict(err)
+      if (navigationSeq === navigationId) {
+        moveConflict.value = conflict
+      }
+      if (conflict) return 'conflict'
+      moveError.value = describeMoveError(err).message
+      return 'error'
+    } finally {
+      isMoving.value = false
+      movingItemId.value = null
+    }
+  }
+
+  /** Limpia el error de un intento de reemplazo anterior — llamada al abrir
+   * el diálogo, para no arrastrar el mensaje de un intento previo. */
+  function resetReplaceState() {
+    replaceError.value = ''
+  }
+
+  /**
+   * Expone el contexto de navegación vigente (`navigationSeq`, privado) a
+   * flujos dueños de otro store que necesitan aplicar más tarde el mismo
+   * criterio de "¿sigo en la misma carpeta que cuando empecé?" que ya usan
+   * `renameItem`/`moveItem`/`replaceFileContent` — hoy solo lo usa el
+   * historial de versiones (`drive-versions.ts`) tras restaurar una
+   * revisión, que no puede leer `navigationSeq` directamente porque es
+   * interno de este store.
+   */
+  function currentNavigationContext(): number {
+    return navigationSeq
+  }
+
+  /**
+   * Sustituye `replaced` dentro de `items` por `id`, pero solo si
+   * `navigationId` sigue siendo el contexto de navegación vigente — mismo
+   * criterio y misma operación que ya aplican `renameItem`/`moveItem`/
+   * `replaceFileContent` tras su propio éxito. Pensada para que otro store
+   * (`drive-versions.ts`, tras restaurar una revisión) refleje el
+   * `DriveItem` resultante en el listado principal sin necesitar acceso
+   * directo a `items` ni a `navigationSeq`.
+   */
+  function applyItemUpdate(replaced: DriveItem, navigationId: number): void {
+    if (navigationSeq !== navigationId) return
+    const index = items.value.findIndex((current) => current.id === replaced.id)
+    if (index !== -1) {
+      items.value = [...items.value.slice(0, index), replaced, ...items.value.slice(index + 1)]
+    }
+  }
+
+  /**
+   * Mismo criterio que `renameItem`: `true` solo si el contenido se
+   * reemplazó realmente en Drive (el diálogo debe cerrarse); `false` si está
+   * bloqueado por un envío duplicado (solo se permite un reemplazo a la vez,
+   * igual que descargas, renombrados y movimientos) o si el reemplazo falló
+   * (el diálogo permanece abierto conservando el archivo elegido y mostrando
+   * `replaceError`).
+   *
+   * Al reemplazarse con éxito, el `DriveItem` que devuelve el backend
+   * sustituye al original dentro de `items` por `id` — sin recargar la
+   * carpeta, sin tocar `breadcrumbs`, `nextPageToken` ni el resto de páginas
+   * ya cargadas — pero solo si el usuario sigue en el mismo contexto de
+   * navegación (`navigationSeq` capturado al empezar, igual que
+   * `downloadFile`/`renameItem`/`moveItem`): si navegó a otra carpeta
+   * mientras la petición estaba en curso, el listado visible ya pertenece a
+   * otra carpeta y no debe tocarse — el reemplazo se considera un éxito en
+   * cualquier caso, ya ocurrió en Drive.
+   */
+  async function replaceFileContent(item: DriveItem, file: File): Promise<boolean> {
+    if (isReplacing.value) return false
+
+    const navigationId = navigationSeq
+    isReplacing.value = true
+    replacingFileId.value = item.id
+    replaceError.value = ''
+
+    try {
+      const replaced = await driveDocumentsService.replaceFileContent(item.id, file)
+      if (navigationSeq === navigationId) {
+        const index = items.value.findIndex((current) => current.id === item.id)
+        if (index !== -1) {
+          items.value = [...items.value.slice(0, index), replaced, ...items.value.slice(index + 1)]
+        }
+      }
+      return true
+    } catch (err) {
+      replaceError.value = describeReplaceError(err).message
+      return false
+    } finally {
+      isReplacing.value = false
+      replacingFileId.value = null
+    }
+  }
+
+  /** Limpia el error de un intento de envío a la papelera anterior — llamada
+   * al abrir el diálogo, para no arrastrar el mensaje de un intento previo. */
+  function resetTrashState() {
+    trashError.value = ''
+  }
+
+  /**
+   * Mismo criterio que `moveItem`: `true` solo si el elemento se envió
+   * realmente a la papelera en Drive (el diálogo debe cerrarse); `false` si
+   * está bloqueado por un envío duplicado (solo se permite un envío a la
+   * papelera a la vez, igual que renombrados, movimientos y reemplazos) o si
+   * la operación falló (el diálogo permanece abierto mostrando
+   * `trashError`, con el elemento seleccionado, para poder reintentar).
+   *
+   * Al enviarse con éxito, si el usuario sigue en el mismo contexto de
+   * navegación que cuando se inició (`navigationSeq` capturado al empezar,
+   * igual que `downloadFile`/`renameItem`/`moveItem`/`replaceFileContent`) el
+   * elemento se retira de `items` por `id` — sin recargar la carpeta, sin
+   * tocar `breadcrumbs` ni `nextPageToken`. Si navegó a otro sitio mientras
+   * la petición estaba en curso, el listado visible ya pertenece a otra
+   * carpeta y no debe tocarse; el envío a la papelera se considera un éxito
+   * en cualquier caso — ya ocurrió en Drive.
+   */
+  async function trashItem(item: DriveItem): Promise<boolean> {
+    if (isTrashing.value) return false
+
+    const navigationId = navigationSeq
+    isTrashing.value = true
+    trashingItemId.value = item.id
+    trashError.value = ''
+
+    try {
+      await driveDocumentsService.trashItem(item.id)
       if (navigationSeq === navigationId) {
         items.value = items.value.filter((current) => current.id !== item.id)
       }
       return true
     } catch (err) {
-      moveError.value = describeMoveError(err).message
+      trashError.value = describeTrashError(err).message
       return false
     } finally {
-      isMoving.value = false
-      movingItemId.value = null
+      isTrashing.value = false
+      trashingItemId.value = null
     }
   }
 
@@ -656,14 +988,23 @@ export const useDriveDocumentsStore = defineStore('drive-documents', () => {
     uploadConfigError,
     isUploading,
     uploadError,
+    uploadConflict,
     downloadingFileId,
     downloadError,
     isRenaming,
     renamingItemId,
     renameError,
+    renameConflict,
     isMoving,
     movingItemId,
     moveError,
+    moveConflict,
+    isReplacing,
+    replacingFileId,
+    replaceError,
+    isTrashing,
+    trashingItemId,
+    trashError,
     loadRoot,
     openFolder,
     goToBreadcrumb,
@@ -679,5 +1020,11 @@ export const useDriveDocumentsStore = defineStore('drive-documents', () => {
     renameItem,
     resetMoveState,
     moveItem,
+    resetReplaceState,
+    replaceFileContent,
+    resetTrashState,
+    trashItem,
+    currentNavigationContext,
+    applyItemUpdate,
   }
 })

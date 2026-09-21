@@ -22,6 +22,31 @@ const router = createRouter({
           component: () => import('@/views/DocumentsView.vue'),
         },
         {
+          path: 'meetings',
+          name: 'meetings',
+          component: () => import('@/views/MeetingsView.vue'),
+        },
+        {
+          path: 'meetings/:id',
+          name: 'meeting-detail',
+          component: () => import('@/views/MeetingDetailView.vue'),
+        },
+        {
+          path: 'dynamics',
+          name: 'dynamics',
+          component: () => import('@/views/DynamicsView.vue'),
+        },
+        {
+          path: 'dynamics/:id',
+          name: 'dynamic-detail',
+          component: () => import('@/views/DynamicDetailView.vue'),
+        },
+        {
+          path: 'trash',
+          name: 'trash',
+          component: () => import('@/views/TrashView.vue'),
+        },
+        {
           path: 'settings/drive',
           name: 'settings-drive',
           component: () => import('@/views/DriveSettingsView.vue'),

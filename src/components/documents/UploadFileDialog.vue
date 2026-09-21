@@ -2,6 +2,8 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import AlertMessage from '@/components/common/AlertMessage.vue'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
+import NameConflictResolver from '@/components/documents/NameConflictResolver.vue'
+import type { DriveNameConflictResponse } from '@/types'
 
 // Mismas reglas de nombre que el backend (`DRIVE_SAFE_NAME_PATTERN`, sobre
 // el valor recortado): obligatorio, distinto de "." / "..", máximo 255
@@ -44,11 +46,28 @@ const props = withDefaults(
     configError?: string
     isUploading: boolean
     uploadError?: string
+    /** Fase 2.6: conflicto estructurado de la subida en curso — su sola
+     * presencia decide si se muestra el formulario o `NameConflictResolver`,
+     * sin necesitar un estado local propio del diálogo. */
+    uploadConflict: DriveNameConflictResponse | null
   }>(),
   { configError: '', uploadError: '' },
 )
 
-const emit = defineEmits<{ submit: [file: File]; cancel: []; 'retry-config': [] }>()
+const emit = defineEmits<{
+  submit: [file: File]
+  cancel: []
+  'retry-config': []
+  /** Reenvíos tras un conflicto — llevan siempre el mismo `File` ya elegido,
+   * porque `selectedFile` es estado de este diálogo y el padre no lo
+   * conserva por su cuenta. */
+  'resolve-keep-both': [file: File]
+  'resolve-replace': [file: File, conflictItemId: string]
+  /** "Volver" del resolver: cancela solo la resolución, nunca el diálogo
+   * completo — el padre limpia `uploadConflict` (vía `resetUploadState`) y
+   * este componente vuelve a mostrar el formulario con `selectedFile` intacto. */
+  'conflict-back': []
+}>()
 
 // Fuente única de verdad de si el formulario puede mostrarse: un
 // `maxUploadBytes` nulo, no finito o no positivo se trata igual que un
@@ -81,6 +100,7 @@ const fileInput = ref<HTMLInputElement>()
 const chooseFileButton = ref<HTMLButtonElement>()
 const cancelButton = ref<HTMLButtonElement>()
 const retryConfigButton = ref<HTMLButtonElement>()
+const conflictResolverRef = ref<InstanceType<typeof NameConflictResolver>>()
 const selectedFile = ref<File | null>(null)
 const fieldError = ref('')
 const isDragOver = ref(false)
@@ -144,6 +164,24 @@ watch(
     if (props.open && isLoadingConfig) {
       await nextTick()
       cancelButton.value?.focus()
+    }
+  },
+)
+
+// Fase 2.6: al aparecer un conflicto, el foco pasa al título del bloque de
+// resolución (primer control lógico del contenido nuevo); al desaparecer
+// (por "Volver" o por una nueva petición que ya no lo reproduce) vuelve al
+// selector de archivo — el mismo punto de partida del formulario.
+watch(
+  () => props.uploadConflict,
+  async (conflict, previousConflict) => {
+    if (!props.open) return
+    if (conflict) {
+      await nextTick()
+      await conflictResolverRef.value?.focusTitle()
+    } else if (previousConflict) {
+      await nextTick()
+      chooseFileButton.value?.focus()
     }
   },
 )
@@ -225,6 +263,23 @@ async function handleSubmit() {
   fieldError.value = ''
   emit('submit', selectedFile.value)
 }
+
+// Reenvíos de una decisión explícita (fase 2.6): siempre con el mismo
+// `selectedFile` ya elegido — no hay nada que volver a validar, el backend
+// ya lo aceptó salvo por el nombre duplicado.
+function handleKeepBoth() {
+  if (!selectedFile.value) return
+  emit('resolve-keep-both', selectedFile.value)
+}
+
+function handleReplace(conflictItemId: string) {
+  if (!selectedFile.value) return
+  emit('resolve-replace', selectedFile.value, conflictItemId)
+}
+
+function handleConflictBack() {
+  emit('conflict-back')
+}
 </script>
 
 <template>
@@ -252,6 +307,18 @@ async function handleSubmit() {
           Reintentar
         </button>
       </div>
+
+      <NameConflictResolver
+        v-else-if="uploadConflict"
+        ref="conflictResolverRef"
+        :conflicts="uploadConflict.conflicts"
+        :allowed-resolutions="uploadConflict.allowedResolutions"
+        operation="upload"
+        :busy="isUploading"
+        @keep-both="handleKeepBoth"
+        @replace="handleReplace"
+        @cancel="handleConflictBack"
+      />
 
       <form
         v-else
@@ -312,7 +379,7 @@ async function handleSubmit() {
           Cancelar
         </button>
         <button
-          v-if="!isLoadingConfig && !showConfigUnavailable"
+          v-if="!isLoadingConfig && !showConfigUnavailable && !uploadConflict"
           type="submit"
           form="upload-file-form"
           class="upload-file-dialog__confirm"

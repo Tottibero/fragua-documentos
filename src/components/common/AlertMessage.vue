@@ -30,7 +30,7 @@ withDefaults(
 
 .alert--info {
   background: var(--accent-soft);
-  color: var(--accent-hover);
+  color: var(--accent-text);
   border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
 }
 </style>

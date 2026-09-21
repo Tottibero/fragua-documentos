@@ -1,7 +1,10 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useRouter } from 'vue-router'
+import { CloudCog, LogOut } from '@lucide/vue'
 import { useAuthStore } from '@/stores/auth'
+import IconButton from '@/components/common/IconButton.vue'
+import ThemeToggle from '@/components/common/ThemeToggle.vue'
 
 const props = defineProps<{ navOpen: boolean }>()
 const emit = defineEmits<{ 'toggle-nav': [] }>()
@@ -34,7 +37,10 @@ function handleLogout() {
       </svg>
     </button>
 
-    <span class="app-header__brand">Fragua Documentos</span>
+    <router-link to="/documents" class="app-header__brand" aria-label="Ir a Documentos">
+      <img src="/fragua47docs.png" alt="" class="app-header__logo" />
+      <span>Fragua Documentos</span>
+    </router-link>
 
     <div class="app-header__spacer"></div>
 
@@ -43,7 +49,14 @@ function handleLogout() {
         <span class="app-header__nickname">{{ authStore.user.nickname }}</span>
         <span class="app-header__role">{{ authStore.user.role }}</span>
       </span>
-      <button type="button" class="logout-button" @click="handleLogout">Cerrar sesión</button>
+      <ThemeToggle />
+      <IconButton
+        v-if="authStore.isSuperAdmin"
+        :icon="CloudCog"
+        label="Configurar Google Drive"
+        :to="{ name: 'settings-drive' }"
+      />
+      <IconButton :icon="LogOut" label="Cerrar sesión" @click="handleLogout" />
     </div>
   </header>
 </template>
@@ -78,9 +91,20 @@ function handleLogout() {
 }
 
 .app-header__brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
   font-weight: 700;
   font-size: 1.05rem;
   letter-spacing: -0.01em;
+  color: var(--text-primary);
+  text-decoration: none;
+}
+
+.app-header__logo {
+  width: 38px;
+  height: 38px;
+  object-fit: contain;
 }
 
 .app-header__spacer {
@@ -90,7 +114,7 @@ function handleLogout() {
 .app-header__user {
   display: flex;
   align-items: center;
-  gap: 0.85rem;
+  gap: 0.5rem;
 }
 
 .app-header__user-info {
@@ -112,28 +136,6 @@ function handleLogout() {
   text-transform: capitalize;
 }
 
-.logout-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 44px;
-  border: 1px solid var(--border);
-  background: var(--bg-surface);
-  color: var(--text-secondary);
-  padding: 0.4rem 0.9rem;
-  border-radius: var(--radius-sm);
-  font-size: 0.85rem;
-  cursor: pointer;
-  transition:
-    background-color 0.15s ease,
-    color 0.15s ease;
-}
-
-.logout-button:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
-
 @media (max-width: 768px) {
   .nav-toggle {
     display: inline-flex;
@@ -141,6 +143,10 @@ function handleLogout() {
 
   .app-header__user-info {
     display: none;
+  }
+
+  .app-header__brand span {
+    font-size: 0.96rem;
   }
 }
 </style>
