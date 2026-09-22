@@ -105,6 +105,25 @@ function describeUpdateMeetingError(err: unknown): string {
   return 'No se ha podido actualizar la reunión.'
 }
 
+function describeDeleteMeetingError(err: unknown): string {
+  if (isAxiosError(err)) {
+    const status = err.response?.status
+    if (status === 403) {
+      return 'No tienes permiso para eliminar esta reunión.'
+    }
+    if (status === 404) {
+      return 'La reunión ya no existe.'
+    }
+    if (status !== undefined && status >= 500) {
+      return 'Ha ocurrido un problema temporal en el servidor. Inténtalo de nuevo en unos segundos.'
+    }
+    if (!err.response) {
+      return 'No se ha podido conectar con el servidor. Comprueba tu conexión e inténtalo de nuevo.'
+    }
+  }
+  return 'No se ha podido eliminar la reunión. Inténtalo de nuevo.'
+}
+
 const TRANSITION_FALLBACK_MESSAGES: Record<MeetingTransitionAction, string> = {
   hold: 'No se ha podido marcar la reunión como celebrada.',
   close: 'No se ha podido cerrar la reunión.',
@@ -179,6 +198,8 @@ export const useMeetingsStore = defineStore('meetings', () => {
   const detailNotFound = ref(false)
   const isUpdating = ref(false)
   const updateError = ref('')
+  const isDeleting = ref(false)
+  const deleteError = ref('')
   // Fase 3.3b — cambio de estado (celebrar, cerrar, reabrir).
   const isTransitioning = ref(false)
   const transitionError = ref('')
@@ -574,6 +595,30 @@ export const useMeetingsStore = defineStore('meetings', () => {
     }
   }
 
+  function resetDeleteState() {
+    deleteError.value = ''
+  }
+
+  async function deleteMeeting(id: string): Promise<boolean> {
+    if (isDeleting.value || isUpdating.value || isTransitioning.value) return false
+
+    const session = detailSessionId
+    isDeleting.value = true
+    deleteError.value = ''
+
+    try {
+      await meetingsService.deleteMeeting(id)
+      if (session !== detailSessionId) return false
+      return true
+    } catch (err) {
+      if (session !== detailSessionId) return false
+      deleteError.value = describeDeleteMeetingError(err)
+      return false
+    } finally {
+      if (session === detailSessionId) isDeleting.value = false
+    }
+  }
+
   /** Limpia el error de un cambio de estado anterior — llamada al abrir el
    * diálogo correspondiente. */
   function resetTransitionState() {
@@ -680,6 +725,8 @@ export const useMeetingsStore = defineStore('meetings', () => {
     detailNotFound.value = false
     isUpdating.value = false
     updateError.value = ''
+    isDeleting.value = false
+    deleteError.value = ''
     isTransitioning.value = false
     transitionError.value = ''
   }
@@ -703,6 +750,8 @@ export const useMeetingsStore = defineStore('meetings', () => {
     detailNotFound,
     isUpdating,
     updateError,
+    isDeleting,
+    deleteError,
     isTransitioning,
     transitionError,
     typeFilter,
@@ -719,6 +768,8 @@ export const useMeetingsStore = defineStore('meetings', () => {
     retryMeeting,
     updateMeeting,
     resetUpdateState,
+    deleteMeeting,
+    resetDeleteState,
     transitionMeeting,
     resetTransitionState,
     refreshMeeting,

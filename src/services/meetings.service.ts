@@ -98,6 +98,11 @@ export const meetingsService = {
     return response.data
   },
 
+  /** `DELETE /meetings/:id` — a successful response intentionally has no body. */
+  async deleteMeeting(id: string): Promise<void> {
+    await api.delete(`/meetings/${id}`)
+  },
+
   // --- Fase 3.3b — cambio de estado ----------------------------------
 
   /** `POST /meetings/:id/hold|close|reopen`: sin cuerpo (el estado destino lo
