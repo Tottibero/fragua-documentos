@@ -5,7 +5,7 @@ import {
   toReadableAxiosError,
   type DownloadFileResult,
 } from '@/services/drive-documents.service'
-import type { Dynamic, DynamicDetail, DynamicEntry, DynamicPdf } from '@/types'
+import type { Dynamic, DynamicDetail, DynamicEntry, DynamicPdf, MeetingCreatedBy } from '@/types'
 
 export interface DynamicPayload {
   title: string
@@ -15,9 +15,15 @@ export interface DynamicPayload {
 export interface DynamicEntryPayload {
   title: string
   description: string
+  authorUserId: string | null
 }
 
 export const dynamicsService = {
+  /** Candidatos del selector de autor. */
+  async listEntryAuthorOptions(): Promise<MeetingCreatedBy[]> {
+    return (await api.get<MeetingCreatedBy[]>('/users')).data
+  },
+
   async list(): Promise<Dynamic[]> {
     return (await api.get<Dynamic[]>('/dynamics')).data
   },

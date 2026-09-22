@@ -10,10 +10,10 @@ import DynamicEntryFormDialog from '@/components/dynamics/DynamicEntryFormDialog
 import DynamicFormDialog from '@/components/dynamics/DynamicFormDialog.vue'
 import DynamicPdfSection from '@/components/dynamics/DynamicPdfSection.vue'
 import { useAuthStore } from '@/stores/auth'
+import { dynamicsService, type DynamicEntryPayload, type DynamicPayload } from '@/services/dynamics.service'
 import { useDynamicsStore } from '@/stores/dynamics'
 import { useToastStore } from '@/stores/toast'
-import type { DynamicEntry } from '@/types'
-import type { DynamicEntryPayload, DynamicPayload } from '@/services/dynamics.service'
+import type { DynamicEntry, MeetingCreatedBy } from '@/types'
 
 const route = useRoute()
 const authStore = useAuthStore()
@@ -23,6 +23,9 @@ const isEditOpen = ref(false)
 const isEntryFormOpen = ref(false)
 const entryBeingEdited = ref<DynamicEntry | null>(null)
 const entryToDelete = ref<DynamicEntry | null>(null)
+const authorOptions = ref<MeetingCreatedBy[]>([])
+const isLoadingAuthors = ref(false)
+const authorsError = ref('')
 
 const canManage = computed(() => {
   const dynamic = dynamicsStore.selected
@@ -48,6 +51,20 @@ function openEntryForm(entry: DynamicEntry | null) {
   dynamicsStore.resetSaveState()
   entryBeingEdited.value = entry
   isEntryFormOpen.value = true
+  void loadAuthorOptions()
+}
+
+async function loadAuthorOptions() {
+  if (isLoadingAuthors.value) return
+  isLoadingAuthors.value = true
+  authorsError.value = ''
+  try {
+    authorOptions.value = await dynamicsService.listEntryAuthorOptions()
+  } catch {
+    authorsError.value = 'No se han podido cargar los usuarios. Inténtalo de nuevo.'
+  } finally {
+    isLoadingAuthors.value = false
+  }
 }
 
 async function submitEntry(payload: DynamicEntryPayload) {
@@ -93,7 +110,7 @@ onUnmounted(() => dynamicsStore.close())
       <DynamicPdfSection :pdf="dynamicsStore.selected.pdf" :can-manage="canManage" :is-exporting="dynamicsStore.isExporting" :error="dynamicsStore.exportError" @export="exportPdf" @download="downloadPdf" />
       <DynamicEntriesList :entries="dynamicsStore.selected.entries" :can-manage="canManage" @add="openEntryForm(null)" @edit="openEntryForm" @remove="entryToDelete = $event" />
       <DynamicFormDialog :open="isEditOpen" :dynamic="dynamicsStore.selected" :is-submitting="dynamicsStore.isSaving" :error="dynamicsStore.saveError" @submit="submitDynamic" @cancel="isEditOpen = false" />
-      <DynamicEntryFormDialog :open="isEntryFormOpen" :entry="entryBeingEdited" :is-submitting="dynamicsStore.isSaving" :error="dynamicsStore.saveError" @submit="submitEntry" @cancel="isEntryFormOpen = false" />
+      <DynamicEntryFormDialog :open="isEntryFormOpen" :entry="entryBeingEdited" :authors="authorOptions" :is-loading-authors="isLoadingAuthors" :authors-error="authorsError" :is-submitting="dynamicsStore.isSaving" :error="dynamicsStore.saveError" @submit="submitEntry" @cancel="isEntryFormOpen = false" @retry-authors="loadAuthorOptions" />
       <ConfirmDialog :open="!!entryToDelete" title="Eliminar contenido" :description="`Se eliminará «${entryToDelete?.title ?? ''}» de esta dinámica.`" confirm-label="Eliminar" danger :is-confirming="dynamicsStore.isSaving" @confirm="removeEntry" @cancel="entryToDelete = null" />
     </template>
   </section>

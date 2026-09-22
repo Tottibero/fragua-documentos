@@ -339,6 +339,8 @@ export interface DynamicEntry {
   position: number
   title: string
   description: string
+  /** Persona elegida como autora del contenido; los registros antiguos pueden no tenerla. */
+  author: MeetingCreatedBy | null
   createdAt: string
   updatedAt: string
 }
