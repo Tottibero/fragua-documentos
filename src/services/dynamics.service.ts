@@ -21,7 +21,9 @@ export interface DynamicEntryPayload {
 export const dynamicsService = {
   /** Candidatos del selector de autor. */
   async listEntryAuthorOptions(): Promise<MeetingCreatedBy[]> {
-    return (await api.get<MeetingCreatedBy[]>('/users')).data
+    return (await api.get<MeetingCreatedBy[]>('/users', {
+      params: { roles: 'admin,superadmin' },
+    })).data
   },
 
   async list(): Promise<Dynamic[]> {
