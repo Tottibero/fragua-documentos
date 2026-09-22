@@ -362,6 +362,20 @@ completado en local.
   más antigua. El límite de página se aplica únicamente al histórico.
 - Definir permisos en backend y no depender únicamente de controles visuales.
 
+**Fase 3.1c —eliminación de borradores— implementada, pendiente de validación manual.**
+Backend: `DELETE /meetings/:id`, con `204` al borrar. Solo puede eliminar la reunión su
+creador o un `admin`/`superadmin`, cualquiera que sea su estado. La lectura, autorización y
+eliminación comparten una transacción con bloqueo `pessimistic_write`. Las filas de puntos,
+asistentes y la referencia local del acta se eliminan por las cascadas ya definidas en
+PostgreSQL; el PDF exportado permanece en Google Drive.
+
+Frontend: `meetingsService.deleteMeeting`, estado propio del store (`isDeleting`,
+`deleteError`) y botón visible solo para el creador o administración. Un diálogo de
+confirmación advierte que se eliminarán también puntos y asistentes y que el PDF exportado
+permanece en Google Drive; tras éxito, vuelve al listado y muestra un toast. Los errores
+`403`, `404` y de red se traducen
+sin exponer mensajes crudos del backend.
+
 ### 3.2 Puntos de la reunión — completada
 
 **Backend implementado y aprobado en `fragua-gestion/back`.**

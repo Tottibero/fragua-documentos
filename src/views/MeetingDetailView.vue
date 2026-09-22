@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { useRoute, RouterLink } from 'vue-router'
+import { useRoute, useRouter, RouterLink } from 'vue-router'
 import { useMeetingsStore } from '@/stores/meetings'
 import { useMeetingPointsStore } from '@/stores/meeting-points'
 import { useMeetingAttendeesStore } from '@/stores/meeting-attendees'
@@ -15,7 +15,8 @@ import MeetingAttendeesSection from '@/components/meetings/MeetingAttendeesSecti
 import MeetingMinutesSection from '@/components/meetings/MeetingMinutesSection.vue'
 import MeetingTransitionDialog from '@/components/meetings/MeetingTransitionDialog.vue'
 import CloseMeetingDialog from '@/components/meetings/CloseMeetingDialog.vue'
-import { ArrowLeft, CalendarCheck, Lock, LockOpen, Pencil } from '@lucide/vue'
+import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
+import { ArrowLeft, CalendarCheck, Lock, LockOpen, Pencil, Trash2 } from '@lucide/vue'
 import { meetingStatusLabel, meetingTypeLabel } from '@/utils/meeting-labels'
 import type { UpdateMeetingPayload } from '@/services/meetings.service'
 import type { MeetingTransitionAction } from '@/types'
@@ -24,6 +25,7 @@ const ACTION_ICON_SIZE = 18
 const ACTION_ICON_STROKE_WIDTH = 1.75
 
 const route = useRoute()
+const router = useRouter()
 const meetingsStore = useMeetingsStore()
 const meetingPointsStore = useMeetingPointsStore()
 const meetingAttendeesStore = useMeetingAttendeesStore()
@@ -33,6 +35,7 @@ const toastStore = useToastStore()
 
 const editButtonRef = ref<HTMLButtonElement>()
 const isEditDialogOpen = ref(false)
+const isDeleteDialogOpen = ref(false)
 const titleRef = ref<HTMLHeadingElement>()
 
 // Fase 3.3b — celebrar y reabrir comparten un diálogo de confirmación;
@@ -64,6 +67,13 @@ const canEdit = computed(() => {
   const user = authStore.user
   if (!meeting || !user) return false
   if (meeting.status !== 'draft') return false
+  return meeting.createdBy.id === user.id || user.role === 'admin' || user.role === 'superadmin'
+})
+
+const canDelete = computed(() => {
+  const meeting = meetingsStore.selectedMeeting
+  const user = authStore.user
+  if (!meeting || !user) return false
   return meeting.createdBy.id === user.id || user.role === 'admin' || user.role === 'superadmin'
 })
 
@@ -178,6 +188,30 @@ async function handleEditSubmit(payload: UpdateMeetingPayload) {
 async function handleEditCancel() {
   isEditDialogOpen.value = false
   await focusEditButton()
+}
+
+function handleOpenDeleteDialog() {
+  meetingsStore.resetDeleteState()
+  isDeleteDialogOpen.value = true
+}
+
+async function handleDeleteConfirm() {
+  const meeting = meetingsStore.selectedMeeting
+  if (!meeting) return
+
+  const name = meeting.name
+  const deleted = await meetingsStore.deleteMeeting(meeting.id)
+  if (deleted) {
+    isDeleteDialogOpen.value = false
+    toastStore.success(`La reunión «${name}» se ha eliminado.`)
+    await router.replace({ name: 'meetings' })
+  } else if (meetingsStore.deleteError) {
+    toastStore.error(meetingsStore.deleteError)
+  }
+}
+
+function handleDeleteCancel() {
+  isDeleteDialogOpen.value = false
 }
 
 const TRANSITION_SUCCESS_MESSAGES: Record<MeetingTransitionAction, (name: string) => string> = {
@@ -392,6 +426,17 @@ onUnmounted(() => {
           </button>
 
           <button
+            v-if="canDelete"
+            type="button"
+            class="meeting-detail__action-button meeting-detail__action-button--danger"
+            :disabled="meetingsStore.isDeleting"
+            @click="handleOpenDeleteDialog"
+          >
+            <Trash2 :size="ACTION_ICON_SIZE" :stroke-width="ACTION_ICON_STROKE_WIDTH" aria-hidden="true" />
+            Eliminar reunión
+          </button>
+
+          <button
             v-if="canHold"
             type="button"
             class="meeting-detail__action-button meeting-detail__action-button--secondary"
@@ -493,6 +538,17 @@ onUnmounted(() => {
       :error="meetingsStore.updateError"
       @submit="handleEditSubmit"
       @cancel="handleEditCancel"
+    />
+
+    <ConfirmDialog
+      :open="isDeleteDialogOpen"
+      title="¿Eliminar reunión?"
+      :description="`Eliminarás definitivamente «${meetingsStore.selectedMeeting?.name ?? ''}» y sus puntos y asistentes. Un acta ya exportada no se elimina de Google Drive. Esta acción no se puede deshacer.`"
+      confirm-label="Eliminar reunión"
+      danger
+      :is-confirming="meetingsStore.isDeleting"
+      @confirm="handleDeleteConfirm"
+      @cancel="handleDeleteCancel"
     />
 
     <MeetingTransitionDialog
@@ -626,6 +682,14 @@ onUnmounted(() => {
 .meeting-detail__action-button--secondary:hover:not(:disabled) {
   background: var(--bg-hover);
   color: var(--text-primary);
+}
+
+.meeting-detail__action-button--danger {
+  background: var(--danger);
+}
+
+.meeting-detail__action-button--danger:hover:not(:disabled) {
+  background: #991616;
 }
 
 .meeting-detail__action-button:disabled {
